@@ -28,40 +28,52 @@ def main():
     toxic.iloc[3, 1]
 
     # construct a vocabulary as a dictionary: {word: integer}
-    vocab = {'__none__': 0}
-    for index, row in train.iterrows():
-        comment = row['comment_text']
-        if index > 0 and index % 50000 == 0:
-            print('%d rows done, size of vocab = %d' % (index, len(vocab)))
-        words = comment.split()
-        for word in words:
-            if word not in vocab:
-                vocab[word] = len(vocab)
+    try:
+        vocab = load_obj("vocab")
+    except FileNotFoundError:
+        vocab = {'__none__': 0}
+        for index, row in train.iterrows():
+            comment = row['comment_text']
+            if index > 0 and index % 50000 == 0:
+                print('%d rows done, size of vocab = %d' % (index, len(vocab)))
+            words = comment.split()
+            for word in words:
+                if word not in vocab:
+                    vocab[word] = len(vocab)
+        save_obj(vocab, "vocab")
 
     # map the word to an integer for all the words
     # build the X
-    X = []
-    for index, row in train.iterrows():
-        comment = row['comment_text']
-        if index > 0 and index % 50000 == 0:
-            print('%d rows done' % (index))
-        words = comment.split()
-        x = []
-        for word in words:
-            x.append(vocab.get(word, 0))
-        X.append(x)
+    try:
+        X = load_obj("word2vec")
+    except FileNotFoundError:
+        X = []
+        for index, row in train.iterrows():
+            comment = row['comment_text']
+            if index > 0 and index % 50000 == 0:
+                print('%d rows done' % (index))
+            words = comment.split()
+            x = []
+            for word in words:
+                x.append(vocab.get(word, 0))
+            X.append(x)
+        save_obj(X, "word2vec")
 
     test = pd.read_csv('input/test.csv.zip')
     Xt = []
-    for index, row in test.iterrows():
-        comment = row['comment_text']
-        if index > 0 and index % 50000 == 0:
-            print('%d rows done' % (index))
-        words = comment.split()
-        x = []
-        for word in words:
-            x.append(vocab.get(word, 0))
-        Xt.append(x)
+    try:
+        Xt = load_obj("test_data")
+    except FileNotFoundError:
+        for index, row in test.iterrows():
+            comment = row['comment_text']
+            if index > 0 and index % 50000 == 0:
+                print('%d rows done' % (index))
+            words = comment.split()
+            x = []
+            for word in words:
+                x.append(vocab.get(word, 0))
+            Xt.append(x)
+        save_obj(Xt, "test_data")
 
     classes = train.columns.values[2:]
     Xt = np.array(Xt)
@@ -72,11 +84,12 @@ def main():
 
     model = textCNN(vocab_size=len(vocab), embedding_size=4)
 
+    print("calling fit====================================")
     model.fit(X, y)
-    print("first fit done")
+    # print("first fit done")
 
-    model.fit(X, y)
-    print("second fit done")
+    # model.fit(X, y)
+    # print("second fit done")
 
     model = textCNN(vocab_size=len(vocab), embedding_size=4)
     yp = model.predict(Xt)
@@ -91,7 +104,8 @@ def main():
 
     s.to_csv('submission.csv', index=False)
 
-    s = pickle.load(open('weight.p', 'rb'))
+    # s = pickle.load(open('weight.pkl', 'rb'))
+    s = load_obj("weight")
 
     for name, values in s.items():
         print(name, values.shape)
@@ -126,18 +140,26 @@ class textCNN:
         self.params['epochs'] = 1
         # build a tf computing graph
         logit = self._build()
-        logit = tf.nn.sigmoid(logit)
+        logit = tf.nn.sigmoid(logit, name="output")
         preds = []
-        print('here')
+        print('predicting:')
         with tf.Session() as sess:
             sess.run(tf.global_variables_initializer())
             sess.run(tf.local_variables_initializer())
-            self.load(sess)
+
+            # self.load(sess)
+
+            # for movidius, use tensorflow saver
+            # restore trained network
+            saver = tf.train.Saver()
+            graph_loc = "."
+            saver.restore(sess, graph_loc + "/graphs/toxic_textcnn_model")
+            saver.save(sess, graph_loc + "/graphs/toxic_textcnn_inference")
             for c, Xb in enumerate(self._batch_gen(shuffle=False)):
-                pred = sess.run(logit, feed_dict={self.inputs: Xb})
-                if c % 10 == 0:
+                pred = sess.run(logit, feed_dict={self.inputs:Xb})
+                if c % 100 == 0:
                     print("batch %d predicted" % (c))
-                    preds.append(pred)
+                preds.append(pred)
         preds = np.vstack(preds)
         return preds
 
@@ -154,19 +176,23 @@ class textCNN:
             sess.run(tf.local_variables_initializer())
             try:
                 self.load(sess)
+                print("loading previous session")
             except FileNotFoundError:
                 print("no previous session! starting fresh")
-            for c, (Xb, yb) in enumerate(self._batch_gen(shuffle=True)):
-                loss, _ = sess.run(
-                    [losst, opt_op], feed_dict={
-                        self.inputs: Xb,
-                        label: yb
-                    })
-                if c % 10 == 0:
-                    print("batch %d train loss %.4f" % (c, loss))
-                if c > 100:
-                    break
+                for c,(Xb,yb) in enumerate(self._batch_gen(shuffle=True)):
+                    loss,_ = sess.run([losst,opt_op],feed_dict={self.inputs:Xb, label:yb})
+                    if c%10 == 0:
+
+                        print("batch %d train loss %.4f"%(c,loss))
+                    if c>100:
+                        break
             self.save(sess)
+
+            # save using tensorflow format for movidius
+            print("saving trained model")
+            saver = tf.train.Saver()
+            graph_loc = "."
+            save_path = saver.save(sess, graph_loc + "/graphs/toxic_textcnn_model")
 
     def get_opt(self, loss):
         opt = tf.train.AdamOptimizer(learning_rate=0.001)
@@ -185,10 +211,12 @@ class textCNN:
         for var in varss:
             val = sess.run(var)
             s[var.name] = val
-        pickle.dump(s, open('weight.p', 'wb'))
+        save_obj(s, 'weight')
+        # pickle.dump(s, open('weight.pkl', 'wb'))
 
-    def load(self, sess, path='weight.p'):
-        s = pickle.load(open(path, 'rb'))
+    def load(self, sess, path='weight'):
+        # s = pickle.load(open(path, 'rb'))
+        s = load_obj(path)
         varss = tf.trainable_variables()
         for var in varss:
             value = s[var.name]
@@ -207,7 +235,8 @@ class textCNN:
         V = self.params['vocab_size']
 
         netname = 'textCNN'
-        self.inputs = tf.placeholder(dtype=tf.int32, shape=[None, None])  # B,S
+        self.inputs = tf.placeholder(
+            dtype=tf.int32, shape=[None, None], name="input")  # B,S
 
         with tf.variable_scope(netname):
             # embedding lookup
@@ -237,11 +266,11 @@ class textCNN:
                 net2.get_shape().as_list(),
                 net3.get_shape().as_list()))
 
-            net = tf.concat([net1, net2, net3], axis=1)
+            net = tf.concat([net2, net3], axis=1)
             print("after concat:", net.get_shape().as_list())
             #print("after conv1d:",net.get_shape().as_list())
 
-            net = self.fc(net, 'fc', cin=90, cout=6, activation=None)
+            net = self.fc(net, 'fc', cin=60, cout=6, activation=None)
             print("after fc:", net.get_shape().as_list())
             return net
 
@@ -290,7 +319,7 @@ class textCNN:
             # w.name = 'textCNN/embedding/w:0'
             self.em = w
             c = tf.zeros([1, E])
-            w = tf.concat([c, w], axis=0)
+            #w = tf.concat([c, w], axis=0)
 
             # embedding lookup
             x = tf.cast(x, tf.int32)
@@ -332,5 +361,16 @@ class textCNN:
     def _predict(self):
         pass
 
+
+def save_obj(obj, name):
+    with open(name + '.pkl', 'wb') as f:
+        pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)
+
+
+def load_obj(name):
+    with open(name + '.pkl', 'rb') as f:
+        return pickle.load(f)
+
+
 if __name__ == "__main__":
-        main()
+    main()

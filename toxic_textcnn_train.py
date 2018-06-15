@@ -9,7 +9,7 @@ def main():
     train = pd.read_csv('input/train.csv.zip')
     toxic = train.loc[train.toxic == 1]
 
-    print("train size, toxic size")
+    print("train size,  toxic size")
     print(train.shape, toxic.shape)
 
     # construct a vocabulary as a dictionary: {word: integer}
@@ -44,6 +44,7 @@ def main():
             X.append(x)
         save_obj(X, "word2vec")
 
+    # test data
     test = pd.read_csv('input/test.csv.zip')
     Xt = []
     try:
@@ -59,15 +60,12 @@ def main():
                 x.append(vocab.get(word, 0))
             Xt.append(x)
         save_obj(Xt, "test_data")
-
-    classes = train.columns.values[2:]
     Xt = np.array(Xt)
 
+    classes = train.columns.values[2:]
     y = train[classes].values
 
-    print(len(X), len(y), y.shape)
-
-    model = textCNN(vocab_size=len(vocab), embedding_size=4)
+    model = textCNN(vocab_size=len(vocab), embedding_size=4,batch_size=128)
 
     print("calling fit====================================")
     model.fit(X, y)
@@ -83,10 +81,43 @@ class textCNN:
     def fit(self, X, y):
         # X is a list of comments. [[fxxk, ..], [something, ..]]
         # len(X) == N == len(y)
+    # y is a numpy array (N, 6)
+        self.X = np.array(X)
+        self.determine_pad()
+        self.y = y
+        self.label, self.losst, self.opt_op= self._train()
+
+        # create tf Saver for movidius
+        saver = tf.train.Saver()
+
+        with tf.Session() as sess:
+            sess.run(tf.global_variables_initializer())
+            sess.run(tf.local_variables_initializer())
+            try:
+                self.load(sess)
+                print("loading previous session")
+            except FileNotFoundError:
+                print("no previous session! starting fresh")
+                for c,(Xb,yb) in enumerate(self._batch_gen(shuffle=True)):
+                    loss,_ = sess.run([self.losst,self.opt_op],feed_dict={self.inputs:Xb, self.label:yb})
+                    if c%10 == 0:
+                        print("batch %d train loss %.4f"%(c,loss))
+                    if c>100:
+                        break
+            self.save(sess)
+
+            # save using tensorflow format for movidius
+            graph_loc = "."
+            save_path = saver.save(sess, graph_loc + "/graphs/toxic_textcnn_model")
+
+
+    def _fit(self, X, y):
+        # X is a list of comments. [[fxxk, ..], [something, ..]]
+        # len(X) == N == len(y)
         # y is a numpy array (N, 6)
         self.X = np.array(X)
         self.y = y
-        self._train()
+        return self._train()
 
     def predict(self, X):
         print('predict')
@@ -99,7 +130,8 @@ class textCNN:
         self.params['epochs'] = 1
         # build a tf computing graph
         logit = self._build()
-        logit = tf.nn.sigmoid(logit, name="output")
+        # logit = tf.nn.sigmoid(logit, name="output")
+        logit = tf.nn.sigmoid(logit)
         preds = []
         print('predicting:')
         with tf.Session() as sess:
@@ -129,29 +161,30 @@ class textCNN:
         label = tf.placeholder(dtype=tf.int32, shape=[None, 6])  # B,classes
         losst = self.get_loss(logit, label)
         opt_op = self.get_opt(losst)
+        return label, losst, opt_op
 
-        with tf.Session() as sess:
-            sess.run(tf.global_variables_initializer())
-            sess.run(tf.local_variables_initializer())
-            try:
-                self.load(sess)
-                print("loading previous session")
-            except FileNotFoundError:
-                print("no previous session! starting fresh")
-                for c,(Xb,yb) in enumerate(self._batch_gen(shuffle=True)):
-                    loss,_ = sess.run([losst,opt_op],feed_dict={self.inputs:Xb, label:yb})
-                    if c%10 == 0:
+        # refactor to return tensor object
+        # with tf.Session() as sess:
+        #     sess.run(tf.global_variables_initializer())
+        #     sess.run(tf.local_variables_initializer())
+        #     try:
+        #         self.load(sess)
+        #         print("loading previous session")
+        #     except FileNotFoundError:
+        #         print("no previous session! starting fresh")
+        #         for c,(Xb,yb) in enumerate(self._batch_gen(shuffle=True)):
+        #             loss,_ = sess.run([losst,opt_op],feed_dict={self.inputs:Xb, label:yb})
+        #             if c%10 == 0:
+        #                 print("batch %d train loss %.4f"%(c,loss))
+        #             if c>100:
+        #                 break
+        #     self.save(sess)
 
-                        print("batch %d train loss %.4f"%(c,loss))
-                    if c>100:
-                        break
-            self.save(sess)
-
-            # save using tensorflow format for movidius
-            print("saving trained model")
-            saver = tf.train.Saver()
-            graph_loc = "."
-            save_path = saver.save(sess, graph_loc + "/graphs/toxic_textcnn_model")
+        #     # save using tensorflow format for movidius
+        #     print("saving trained model")
+        #     saver = tf.train.Saver()
+        #     graph_loc = "."
+        #     save_path = saver.save(sess, graph_loc + "/graphs/toxic_textcnn_model")
 
     def get_opt(self, loss):
         opt = tf.train.AdamOptimizer(learning_rate=0.001)
@@ -192,10 +225,11 @@ class textCNN:
         # self.inputs => Xb
         E = self.params.get('embedding_size', 16)
         V = self.params['vocab_size']
+        S = self.S
 
         netname = 'textCNN'
         self.inputs = tf.placeholder(
-            dtype=tf.int32, shape=[None, None], name="input")  # B,S
+            dtype=tf.int32, shape=[None, S], name="input")  # B,S
 
         with tf.variable_scope(netname):
             # embedding lookup
@@ -214,11 +248,23 @@ class textCNN:
             print("before maxpool net1: {} net2: {} net3: {}".format(
                 net1.get_shape().as_list(),
                 net2.get_shape().as_list(),
-                net3.get_shape().as_list()))
+                net3.get_shape().as_list())) 
+            # rewrote max_pool because movidius doesn't support tf.gather (used in tf.reduce_max)
+            # net1 = tf.reduce_max(net1, axis=1)
+            # net2 = tf.reduce_max(net2, axis=1)
+            # net3 = tf.reduce_max(net3, axis=1)
 
-            net1 = tf.reduce_max(net1, axis=1)
-            net2 = tf.reduce_max(net2, axis=1)
-            net3 = tf.reduce_max(net3, axis=1)
+            net1 = tf.expand_dims(net1, -1)
+            net1 = tf.nn.max_pool(net1, [1, -1, 1, 1], [1, 1, 1, 1], padding="VALID")
+            net1 = tf.squeeze(net1, [1, 3])
+
+            net2 = tf.expand_dims(net2, -1)
+            net2 = tf.nn.max_pool(net2, [1, -1, 1, 1], [1, 1, 1, 1], padding="VALID")
+            net2 = tf.squeeze(net2, [1, 3])
+
+            net3 = tf.expand_dims(net3, -1)
+            net3 = tf.nn.max_pool(net3, [1, -1, 1, 1], [1, 1, 1, 1], padding="VALID")
+            net3 = tf.squeeze(net3, [1, 3])
 
             print("after maxpool net1: {} net2: {} net3: {}".format(
                 net1.get_shape().as_list(),
@@ -310,7 +356,8 @@ class textCNN:
 
     def padding(self, X):
         Xn = []
-        maxlen = max([len(i) for i in X])
+        # maxlen = max([len(i) for i in X])
+        maxlen = self.S
         for x in X:
             xn = x + [0] * (maxlen - len(x))
             assert len(xn) == maxlen
@@ -319,6 +366,12 @@ class textCNN:
 
     def _predict(self):
         pass
+
+    def determine_pad(self):
+        # clips input sequences to length S
+        lengths = [len(i) for i in self.X]
+        self.S = max(lengths)
+        print("m comment length", self.S)
 
 
 def save_obj(obj, name):

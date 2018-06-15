@@ -41,21 +41,22 @@ def main():
     # model.fit(X, y)
     # print("second fit done")
 
-    model = textCNN(vocab_size=len(vocab), embedding_size=4, batch_size = 4)
+    model = textCNN(vocab_size=len(vocab), embedding_size=4, batch_size=1)
+    print("calling predict====================================")
     yp = model.predict(Xt)
-    yp.shape
-    s = pd.DataFrame(
-        yp,
-        columns=[
-            'toxic', 'severe_toxic', 'obscene', 'threat', 'insult',
-            'identity_hate'
-        ])
-    s['id'] = test['id']
+    print("done predict=======================================")
 
-    s.to_csv('submission.csv', index=False)
+    # not needed yet
+    # yp.shape
+    # s = pd.DataFrame(
+    #     yp,
+    #     columns=[
+    #         'toxic', 'severe_toxic', 'obscene', 'threat', 'insult',
+    #         'identity_hate'
+    #     ])
+    # s['id'] = test['id']
 
-    # s = pickle.load(open('weight.pkl', 'rb'))
-    s = load_obj("weight")
+    # s.to_csv('submission.csv', index=False)
 
 
 class textCNN:
@@ -63,14 +64,53 @@ class textCNN:
         # params is a dictionary
         self.params = params
         self.y = None
+        self.S = load_obj("S")
 
     def fit(self, X, y):
         # X is a list of comments. [[fxxk, ..], [something, ..]]
         # len(X) == N == len(y)
         # y is a numpy array (N, 6)
         self.X = np.array(X)
+        self.determine_pad()
         self.y = y
-        self._train()
+        self.label, self.losst, self.opt_op = self._train()
+
+        # create tf Saver for movidius
+        saver = tf.train.Saver()
+
+        with tf.Session() as sess:
+            sess.run(tf.global_variables_initializer())
+            sess.run(tf.local_variables_initializer())
+            try:
+                self.load(sess)
+                print("loading previous session")
+            except FileNotFoundError:
+                print("no previous session! starting fresh")
+                for c, (Xb, yb) in enumerate(self._batch_gen(shuffle=True)):
+                    loss, _ = sess.run(
+                        [self.losst, self.opt_op],
+                        feed_dict={
+                            self.inputs: Xb,
+                            self.label: yb
+                        })
+                    if c % 10 == 0:
+                        print("batch %d train loss %.4f" % (c, loss))
+                    if c > 100:
+                        break
+            self.save(sess)
+
+            # save using tensorflow format for movidius
+            graph_loc = "."
+            save_path = saver.save(sess,
+                                   graph_loc + "/graphs/toxic_textcnn_model")
+
+    def _fit(self, X, y):
+        # X is a list of comments. [[fxxk, ..], [something, ..]]
+        # len(X) == N == len(y)
+        # y is a numpy array (N, 6)
+        self.X = np.array(X)
+        self.y = y
+        return self._train()
 
     def predict(self, X):
         print('predict')
@@ -83,8 +123,14 @@ class textCNN:
         self.params['epochs'] = 1
         # build a tf computing graph
         logit = self._build()
+        print("made logit in predictx")
+        # output tensor for movidius
         logit = tf.nn.sigmoid(logit, name="output")
         preds = []
+
+        # tensorflow saver for movidius
+        saver = tf.train.Saver()
+
         print('predicting:')
         with tf.Session() as sess:
             sess.run(tf.global_variables_initializer())
@@ -94,17 +140,18 @@ class textCNN:
 
             # for movidius, use tensorflow saver
             # restore trained network
-            saver = tf.train.Saver()
             graph_loc = "."
             saver.restore(sess, graph_loc + "/graphs/toxic_textcnn_model")
             saver.save(sess, graph_loc + "/graphs/toxic_textcnn_inference")
+
+         # comment out actual inference for movidius
             for c, Xb in enumerate(self._batch_gen(shuffle=False)):
-                pred = sess.run(logit, feed_dict={self.inputs:Xb})
-                if c % 1000 == 0:
+                pred = sess.run(logit, feed_dict={self.inputs: Xb})
+                if c % 100 == 0:
                     print("batch %d predicted" % (c))
                 preds.append(pred)
         preds = np.vstack(preds)
-        return preds
+        # return preds
 
     def _train(self):
         tf.reset_default_graph()
@@ -113,29 +160,30 @@ class textCNN:
         label = tf.placeholder(dtype=tf.int32, shape=[None, 6])  # B,classes
         losst = self.get_loss(logit, label)
         opt_op = self.get_opt(losst)
+        return label, losst, opt_op
 
-        with tf.Session() as sess:
-            sess.run(tf.global_variables_initializer())
-            sess.run(tf.local_variables_initializer())
-            try:
-                self.load(sess)
-                print("loading previous session")
-            except FileNotFoundError:
-                print("no previous session! starting fresh")
-                for c,(Xb,yb) in enumerate(self._batch_gen(shuffle=True)):
-                    loss,_ = sess.run([losst,opt_op],feed_dict={self.inputs:Xb, label:yb})
-                    if c%10 == 0:
+        # refactor to return tensor object
+        # with tf.Session() as sess:
+        #     sess.run(tf.global_variables_initializer())
+        #     sess.run(tf.local_variables_initializer())
+        #     try:
+        #         self.load(sess)
+        #         print("loading previous session")
+        #     except FileNotFoundError:
+        #         print("no previous session! starting fresh")
+        #         for c,(Xb,yb) in enumerate(self._batch_gen(shuffle=True)):
+        #             loss,_ = sess.run([losst,opt_op],feed_dict={self.inputs:Xb, label:yb})
+        #             if c%10 == 0:
+        #                 print("batch %d train loss %.4f"%(c,loss))
+        #             if c>100:
+        #                 break
+        #     self.save(sess)
 
-                        print("batch %d train loss %.4f"%(c,loss))
-                    if c>100:
-                        break
-            self.save(sess)
-
-            # save using tensorflow format for movidius
-            print("saving trained model")
-            saver = tf.train.Saver()
-            graph_loc = "."
-            save_path = saver.save(sess, graph_loc + "/graphs/toxic_textcnn_model")
+        #     # save using tensorflow format for movidius
+        #     print("saving trained model")
+        #     saver = tf.train.Saver()
+        #     graph_loc = "."
+        #     save_path = saver.save(sess, graph_loc + "/graphs/toxic_textcnn_model")
 
     def get_opt(self, loss):
         opt = tf.train.AdamOptimizer(learning_rate=0.001)
@@ -176,10 +224,11 @@ class textCNN:
         # self.inputs => Xb
         E = self.params.get('embedding_size', 16)
         V = self.params['vocab_size']
+        S = self.S
 
         netname = 'textCNN'
         self.inputs = tf.placeholder(
-            dtype=tf.int32, shape=[None, None], name="input")  # B,S
+            dtype=tf.int32, shape=[None, S], name="input")  # B,S
 
         with tf.variable_scope(netname):
             # embedding lookup
@@ -243,7 +292,11 @@ class textCNN:
             dtype=tf.float32,
             initializer=tf.contrib.layers.xavier_initializer()
         )  # filter variable
-        net = tf.nn.conv1d(net, filters, stride, padding='VALID')
+        net = tf.nn.conv1d(net, filters, stride, padding='SAME')
+        # see if VALID causes mess
+        # net = tf.nn.conv1d(net, filters, stride, padding='VALID')
+        print("net size:", net.get_shape().as_list())
+        print("filter size:", filters.get_shape().as_list())
         if activation == 'relu':
             net = tf.nn.relu(net)
         return net
@@ -272,10 +325,10 @@ class textCNN:
 
     def _batch_gen(self, shuffle=True):
         X, y = self.X, self.y
-        B = self.params.get('batch_size', 1)
+        B = self.params.get('batch_size', 128)
         epochs = self.params.get('epochs', 10)
         ids = [i for i in range(len(X))]
-        batches = len(X) // B + bool(len(X) % B)
+        batches = len(X) // B  + bool(len(X) % B)
         print(epochs, batches)
         for epoch in range(epochs):
             if shuffle:
@@ -287,15 +340,15 @@ class textCNN:
                     yield Xb, y[idx]
                 else:
                     yield Xb
-            # if (i + 1) * B > len(X):
-            #     print("I got here")
-            #     idx = ids[(i + 1) * B:len(X)]
-            #     Xb = self.padding(X[idx])
-            #     yield Xb
+            if (i + 1) * B < len(X):
+                idx = ids[(i + 1) * B:len(X)]
+                Xb = self.padding(X[idx])
+                yield Xb
 
     def padding(self, X):
         Xn = []
-        maxlen = max([len(i) for i in X])
+        # maxlen = max([len(i) for i in X])
+        maxlen = self.S
         for x in X:
             xn = x + [0] * (maxlen - len(x))
             assert len(xn) == maxlen
@@ -305,6 +358,11 @@ class textCNN:
     def _predict(self):
         pass
 
+    def determine_pad(self):
+        # clips input sequences to length S
+        lengths = [len(i) for i in self.X]
+        self.S = max(lengths)
+        print("m comment length", self.S)
 
 def save_obj(obj, name):
     with open(name + '.pkl', 'wb') as f:

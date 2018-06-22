@@ -5,6 +5,7 @@ import random
 import pickle
 
 
+
 def main():
     train = pd.read_csv('input/train.csv.zip')
     toxic = train.loc[train.toxic == 1]
@@ -101,7 +102,8 @@ class textCNN:
                 for c,(Xb,yb) in enumerate(self._batch_gen(shuffle=True)):
                     loss,_ = sess.run([self.losst,self.opt_op],feed_dict={self.inputs:Xb, self.label:yb})
                     if c%10 == 0:
-                        print("batch %d train loss %.4f"%(c,loss))
+                        pass
+                        # print("batch %d train loss %.4f"%(c,loss))
                     if c>100:
                         break
             self.save(sess)
@@ -226,7 +228,7 @@ class textCNN:
         E = self.params.get('embedding_size', 16)
         V = self.params['vocab_size']
         S = self.S
-
+        
         netname = 'textCNN'
         self.inputs = tf.placeholder(
             dtype=tf.int32, shape=[None, S], name="input")  # B,S
@@ -240,42 +242,43 @@ class textCNN:
 
             net1 = self.conv1d(
                 net, name='conv1', ngrams=3, stride=1, cin=E, nfilters=30)
-            net2 = self.conv1d(
-                net, name='conv2', ngrams=1, stride=1, cin=E, nfilters=10)
-            net3 = self.conv1d(
-                net, name='conv3', ngrams=5, stride=1, cin=E, nfilters=50)
+            # net2 = self.conv1d(
+            #     net, name='conv2', ngrams=1, stride=1, cin=E, nfilters=10)
+            # net3 = self.conv1d(
+            #     net, name='conv3', ngrams=5, stride=1, cin=E, nfilters=50)
 
-            print("before maxpool net1: {} net2: {} net3: {}".format(
-                net1.get_shape().as_list(),
-                net2.get_shape().as_list(),
-                net3.get_shape().as_list())) 
-            # rewrote max_pool because movidius doesn't support tf.gather (used in tf.reduce_max)
-            # net1 = tf.reduce_max(net1, axis=1)
+            # print("before maxpool net1: {} net2: {} net3: {}".format(
+            #     net1.get_shape().as_list(),
+            #     net2.get_shape().as_list(),
+            #     net3.get_shape().as_list()))
+
+            net1 = tf.reduce_max(net1, axis=1)
             # net2 = tf.reduce_max(net2, axis=1)
             # net3 = tf.reduce_max(net3, axis=1)
 
-            net1 = tf.expand_dims(net1, -1)
-            net1 = tf.nn.max_pool(net1, [1, -1, 1, 1], [1, 1, 1, 1], padding="VALID")
-            net1 = tf.squeeze(net1, [1, 3])
+            # # rewrote max_pool because movidius doesn't support tf.gather (used in tf.reduce_max)
+            # net1 = tf.expand_dims(net1, -1)
+            # net1 = tf.nn.max_pool(net1, [1, 1409, 1, 1], [1, 1, 1, 1], padding="VALID")
+            # net1 = tf.squeeze(net1, [1, 3])
 
-            net2 = tf.expand_dims(net2, -1)
-            net2 = tf.nn.max_pool(net2, [1, -1, 1, 1], [1, 1, 1, 1], padding="VALID")
-            net2 = tf.squeeze(net2, [1, 3])
+            # net2 = tf.expand_dims(net2, -1)
+            # net2 = tf.nn.max_pool(net2, [1, 1411, 1, 1], [1, 1, 1, 1], padding="VALID")
+            # net2 = tf.squeeze(net2, [1, 3])
 
-            net3 = tf.expand_dims(net3, -1)
-            net3 = tf.nn.max_pool(net3, [1, -1, 1, 1], [1, 1, 1, 1], padding="VALID")
-            net3 = tf.squeeze(net3, [1, 3])
+            # net3 = tf.expand_dims(net3, -1)
+            # net3 = tf.nn.max_pool(net3, [1, 1407, 1, 1], [1, 1, 1, 1], padding="VALID")
+            # net3 = tf.squeeze(net3, [1, 3])
 
-            print("after maxpool net1: {} net2: {} net3: {}".format(
-                net1.get_shape().as_list(),
-                net2.get_shape().as_list(),
-                net3.get_shape().as_list()))
+            # print("after maxpool net1: {} net2: {} net3: {}".format(
+            #     net1.get_shape().as_list(),
+            #     net2.get_shape().as_list(),
+            #     net3.get_shape().as_list()))
 
-            net = tf.concat([net2, net3], axis=1)
-            print("after concat:", net.get_shape().as_list())
-            #print("after conv1d:",net.get_shape().as_list())
+            # net = tf.concat([net2, net3], axis=1)
+            # print("after concat:", net.get_shape().as_list())
+            # #print("after conv1d:",net.get_shape().as_list())
 
-            net = self.fc(net, 'fc', cin=60, cout=6, activation=None)
+            net = self.fc(net1, 'fc', cin=30, cout=6, activation=None)
             print("after fc:", net.get_shape().as_list())
             return net
 
@@ -305,6 +308,8 @@ class textCNN:
             dtype=tf.float32,
             initializer=tf.contrib.layers.xavier_initializer()
         )  # filter variable
+        print("filter dim", filters.get_shape())
+        print("net size", net.get_shape())
         net = tf.nn.conv1d(net, filters, stride, padding='VALID')
         if activation == 'relu':
             net = tf.nn.relu(net)
@@ -312,6 +317,17 @@ class textCNN:
 
     def embedding_lookup(self, E, V, x, reuse=False):
         # x is the key
+        # rewrote to avoid tf.gather
+
+        # rows = np.arange(x.get_shape().as_list()[0])
+        # stack_list = [w[x[row], :] for row in rows]
+        # embedding = tf.stack(stack_list)
+
+        # return embedding
+
+
+
+        print("key size lookup:", x.get_shape().as_list())
         with tf.variable_scope('embedding', reuse=reuse):
 
             # initialize the embedding matrix variable
@@ -330,6 +346,14 @@ class textCNN:
             x = tf.cast(x, tf.int32)
             x = tf.nn.embedding_lookup(
                 w, x, name='word_vector')  # (N, T, M) or (N, M)
+            # avoid tf.gather
+            # rows = np.arange(x.get_shape().as_list()[1])
+            # print("x shape", x.get_shape())
+            # print("w shape", w.get_shape())
+            # print("rows", x.get_shape().as_list()[1])
+            # stack_list = [w[x[0, row], :] for row in rows]
+            # embedding = tf.stack(stack_list, axis = 0)
+            # embedding = tf.expand_dims(embedding, 0)
             return x
 
     def _batch_gen(self, shuffle=True):

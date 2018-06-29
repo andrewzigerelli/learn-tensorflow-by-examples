@@ -32,9 +32,9 @@ $(TRAIN) : weight.pkl
 %.pkl: 
 	@if [ ! -e $@	]; then \
 	    rm -rf graphs/; \
-	    python $(TRAIN); \
+	    # python $(TRAIN) 2>&1 | grep -v "I tensorflow"; \
 	fi
-
+	    python $(TRAIN); \
 
 .PHONY: infer
 infer: train inference

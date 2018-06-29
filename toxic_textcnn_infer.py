@@ -3,9 +3,13 @@ import numpy as np
 import tensorflow as tf
 import random
 import pickle
+import os
 
 
 def main():
+    # stop tensorflow polluting stdout
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+
     # construct a vocabulary as a dictionary: {word: integer}
     try:
         vocab = load_obj("vocab")
@@ -121,8 +125,10 @@ class textCNN:
     def predictx(self):
         tf.reset_default_graph()
         self.params['epochs'] = 1
+
         # build a tf computing graph
         logit = self._build()
+        # call embedding lookup
         print("made logit in predictx")
         # output tensor for movidius
         logit = tf.nn.sigmoid(logit, name="output")
@@ -144,8 +150,9 @@ class textCNN:
             saver.restore(sess, graph_loc + "/graphs/toxic_textcnn_model")
             saver.save(sess, graph_loc + "/graphs/toxic_textcnn_inference")
 
-            # comment out actual inference for movidius
+        # comment out actual inference for movidius
         #     for c, Xb in enumerate(self._batch_gen(shuffle=False)):
+        #         Xb = self.embedding_lookup_np(Xb)
         #         pred = sess.run(logit, feed_dict={self.inputs: Xb})
         #         if c % 100 == 0:
         #             print("batch %d predicted" % (c))
@@ -227,32 +234,31 @@ class textCNN:
         S = self.S
         weight = load_obj("weight")
         w = weight["textCNN/embedding/w:0"]
-
-        # do embedding lookup in numpy
+        self.em = w
 
         netname = 'textCNN'
-        self.inputs = tf.placeholder(
-            dtype=tf.int32, shape=[None, S], name="input")  # B,S
 
-
+        self.inputs = tf.placeholder(dtype = tf.float32, shape=[None, S, E, 1], name="input")
 
         with tf.variable_scope(netname):
-            print("Input:", self.inputs.get_shape().as_list())
+            # print("Input:", self.inputs.get_shape().as_list())
             # net = self.embedding_lookup(
             #     E, V, self.inputs, reuse=False)  # dim(net) = B,S,E
             # print("after embedding lookup:", net.get_shape().as_list())
 
-            net = self.embedding_lookup(
-                E, V, self.inputs, reuse=False)  # dim(net) = B,S,E
+            # net = self.embedding_lookup(
+                # E, V, self.inputs, reuse=False)  # dim(net) = B,S,E
 
-            print("after embedding lookup:", net.get_shape().as_list())
+            print("after embedding lookup:", self.inputs.get_shape().as_list())
             net1 = self.conv1d(
-                net,
+                self.inputs,
                 name='conv1',
                 ngrams=3,
                 stride=1,
                 cin=E,
                 nfilters=30)
+            print("after conv1d", net1.get_shape().as_list())
+
             # net2 = self.conv1d(
             #     net,
             #     name='conv2',
@@ -273,7 +279,17 @@ class textCNN:
             #     net2.get_shape().as_list(),
             #     net3.get_shape().as_list()))
 
-            net1 = tf.reduce_max(net1, axis=1)
+            net1 = tf.nn.max_pool(net1, [1, 1411, 4, 1], [1, 1, 1, 1], padding="VALID")
+            print("after nn_max_pool", net1.get_shape().as_list())
+            net1 = tf.squeeze(net1, [1, 2])
+            print("after squeeze", net1.get_shape().as_list())
+            # need to avoid max layer
+            # net1 = tf.reduce_max(net1, axis=1)
+            # net1 = tf.reduce_max(net1, axis=1)
+            # net1 = tf.expand_dims(net1, -1)
+            # net1 = tf.nn.max_pool(net1, [1, 1411, 1, 1], [1, 1, 1, 1], padding="VALID")
+            # net1 = tf.squeeze(net1, [1, 3])
+            print("after maxpool net1", net1.get_shape().as_list())
             # net2 = tf.reduce_max(net2, axis=1)
             # net3 = tf.reduce_max(net3, axis=1)
 
@@ -310,9 +326,16 @@ class textCNN:
                nfilters,
                activation='relu'):
         # filters: kernel_size, cin, cout
+        # filters = tf.get_variable(
+        #     name='%s_filters' % name,
+        #     shape=[ngrams, cin, nfilters],
+        #     dtype=tf.float32,
+        #     initializer=tf.contrib.layers.xavier_initializer()
+        # )  # filter variable
+        # for movidius
         filters = tf.get_variable(
             name='%s_filters' % name,
-            shape=[ngrams, cin, nfilters],
+            shape=[ngrams, cin, 1, nfilters],
             dtype=tf.float32,
             initializer=tf.contrib.layers.xavier_initializer()
         )  # filter variable
@@ -320,10 +343,14 @@ class textCNN:
         print("net size:", net.get_shape())
         # net = tf.nn.conv1d(net, filters, stride, padding='SAME')
         # see if VALID causes mess
-        net = tf.nn.conv1d(net, filters, stride, padding='VALID')
+        # net = tf.nn.conv1d(net, filters, stride, padding='SAME')
+        strides = [1, 1, 1, 1]
+        net = tf.nn.conv2d(net, filters, strides, padding='SAME')
+        # net = tf.nn.convolution(net, filters, padding='SAME')
         if activation == 'relu':
             net = tf.nn.relu(net)
         return net
+
 
     def embedding_lookup(self, E, V, x, reuse=False):
         # x is the key
@@ -332,14 +359,15 @@ class textCNN:
         with tf.variable_scope('embedding', reuse=reuse):
 
             # initialize the embedding matrix variable
-            w = tf.get_variable(
-                name='w',
-                shape=[V - 1, E],
-                dtype=tf.float32,
-                initializer=tf.contrib.layers.xavier_initializer()
-            )  # embedding matrix
+            # w = tf.get_variable(
+            #     name='w',
+            #     shape=[V - 1, E],
+            #     dtype=tf.float32,
+            #     initializer=tf.contrib.layers.xavier_initializer()
+            # )  # embedding matrix
             # w.name = 'textCNN/embedding/w:0'
-            self.em = w
+            # w = tf.expand_dims(w, 0)
+            # self.em = w
             c = tf.zeros([1, E])
             #w = tf.concat([c, w], axis=0)
 
@@ -347,16 +375,32 @@ class textCNN:
             x = tf.cast(x, tf.int32)
             # x = tf.nn.embedding_lookup(
             #     w, x, name='word_vector')  # (N, T, M) or (N, M)
+            w = self.em
+            w = tf.cast(w, tf.float32)
+            w = tf.expand_dims(w,0)
 
             # avoid tf.gather
+            print(type(x))
             rows = np.arange(x.get_shape().as_list()[1])
             print("x shape", x.get_shape())
             print("w shape", w.get_shape())
             print("rows", x.get_shape().as_list()[1])
-            stack_list = [w[x[0, row], :] for row in rows]
+            stack_list = [w[:, x[0, row], :] for row in rows]
             embedding = tf.stack(stack_list, axis = 0)
-            embedding = tf.expand_dims(embedding, 0)
+            print("embedding before transpose", embedding.get_shape().as_list())
+            embedding = tf.transpose(embedding, perm = [1, 0, 2])
+            print("embedding after transpose", embedding.get_shape().as_list())
+            # embedding = tf.expand_dims(embedding, 0)
             return embedding
+
+    def embedding_lookup_np(self, Xb):
+        w = self.em
+        embedding = [np.take(w,Xb[i,:], axis=0) for i in range(Xb.shape[0])]
+        embedding = np.array(embedding)
+
+        # expand dim to work with conv2d
+        embedding = np.expand_dims(embedding, axis=-1)
+        return embedding
 
     def _batch_gen(self, shuffle=True):
         X, y = self.X, self.y

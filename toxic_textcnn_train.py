@@ -3,10 +3,14 @@ import numpy as np
 import tensorflow as tf
 import random
 import pickle
+import os
 
 
 
 def main():
+    # stop tensorflow polluting stdout
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+
     train = pd.read_csv('input/train.csv.zip')
     toxic = train.loc[train.toxic == 1]
 
@@ -91,6 +95,9 @@ class textCNN:
         # create tf Saver for movidius
         saver = tf.train.Saver()
 
+        # stop polluting stdout
+        tf.logging.set_verbosity(tf.logging.FATAL)
+
         with tf.Session() as sess:
             sess.run(tf.global_variables_initializer())
             sess.run(tf.local_variables_initializer())
@@ -111,6 +118,21 @@ class textCNN:
             # save using tensorflow format for movidius
             graph_loc = "."
             save_path = saver.save(sess, graph_loc + "/graphs/toxic_textcnn_model")
+            w = self.em
+            x = tf.cast(Xb, tf.int32)
+            save_obj(Xb, "Xb")
+            lookup = tf.nn.embedding_lookup(
+                w, x, name='word_vector')  # (N, T, M) or (N, M)
+            lookup = sess.run(lookup)
+            w = sess.run(w)
+            print("last embedding")
+            # print(lookup)
+            # print(type(lookup))
+            # print(w)
+            print("w shape", w.shape)
+            print("x shape", x.shape)
+            print("lookup shape", lookup.shape)
+            print("DONE with self save")
 
 
     def _fit(self, X, y):
@@ -205,6 +227,8 @@ class textCNN:
         for var in varss:
             val = sess.run(var)
             s[var.name] = val
+            print(type(val))
+            print(type(var))
         save_obj(s, 'weight')
         # pickle.dump(s, open('weight.pkl', 'wb'))
 
@@ -228,7 +252,7 @@ class textCNN:
         E = self.params.get('embedding_size', 16)
         V = self.params['vocab_size']
         S = self.S
-        
+
         netname = 'textCNN'
         self.inputs = tf.placeholder(
             dtype=tf.int32, shape=[None, S], name="input")  # B,S
@@ -242,32 +266,30 @@ class textCNN:
 
             net1 = self.conv1d(
                 net, name='conv1', ngrams=3, stride=1, cin=E, nfilters=30)
+            print("after conv1d", net1.get_shape().as_list())
             # net2 = self.conv1d(
             #     net, name='conv2', ngrams=1, stride=1, cin=E, nfilters=10)
             # net3 = self.conv1d(
             #     net, name='conv3', ngrams=5, stride=1, cin=E, nfilters=50)
 
+            # net1 = tf.expand_dims(net1, -1)
+            # print("after expand_dim", net1.get_shape().as_list())
+            net1 = tf.nn.max_pool(net1, [1, 1411, 4, 1], [1, 1, 1, 1], padding="VALID")
+            print("after nn_max_pool", net1.get_shape().as_list())
+            net1 = tf.squeeze(net1, [1, 2])
+            print("after squeeze", net1.get_shape().as_list())
+            # need to try to avoid max layer
+            # net1 = tf.reduce_max(net1, axis=1)
+            # net1 = tf.reduce_max(net1, axis=1)
+            # print("after maxpool net1", net1.get_shape().as_list())
             # print("before maxpool net1: {} net2: {} net3: {}".format(
             #     net1.get_shape().as_list(),
             #     net2.get_shape().as_list(),
             #     net3.get_shape().as_list()))
 
-            net1 = tf.reduce_max(net1, axis=1)
+            # net1 = tf.reduce_max(net1, axis=1)
             # net2 = tf.reduce_max(net2, axis=1)
             # net3 = tf.reduce_max(net3, axis=1)
-
-            # # rewrote max_pool because movidius doesn't support tf.gather (used in tf.reduce_max)
-            # net1 = tf.expand_dims(net1, -1)
-            # net1 = tf.nn.max_pool(net1, [1, 1409, 1, 1], [1, 1, 1, 1], padding="VALID")
-            # net1 = tf.squeeze(net1, [1, 3])
-
-            # net2 = tf.expand_dims(net2, -1)
-            # net2 = tf.nn.max_pool(net2, [1, 1411, 1, 1], [1, 1, 1, 1], padding="VALID")
-            # net2 = tf.squeeze(net2, [1, 3])
-
-            # net3 = tf.expand_dims(net3, -1)
-            # net3 = tf.nn.max_pool(net3, [1, 1407, 1, 1], [1, 1, 1, 1], padding="VALID")
-            # net3 = tf.squeeze(net3, [1, 3])
 
             # print("after maxpool net1: {} net2: {} net3: {}".format(
             #     net1.get_shape().as_list(),
@@ -302,15 +324,23 @@ class textCNN:
                nfilters,
                activation='relu'):
         # filters: kernel_size, cin, cout
+        # filters = tf.get_variable(
+        #     name='%s_filters' % name,
+        #     shape=[ngrams, cin, nfilters],
+        #     dtype=tf.float32,
+        #     initializer=tf.contrib.layers.xavier_initializer()
+        # )  # filter variable
         filters = tf.get_variable(
             name='%s_filters' % name,
-            shape=[ngrams, cin, nfilters],
+            shape=[ngrams, cin, 1, nfilters],
             dtype=tf.float32,
             initializer=tf.contrib.layers.xavier_initializer()
         )  # filter variable
         print("filter dim", filters.get_shape())
         print("net size", net.get_shape())
-        net = tf.nn.conv1d(net, filters, stride, padding='VALID')
+        strides = [1, 1, 1, 1] # for 2d
+        # net = tf.nn.conv1d(net, filters, stride, padding='SAME')
+        net = tf.nn.conv2d(net, filters, strides, padding='SAME')
         if activation == 'relu':
             net = tf.nn.relu(net)
         return net
@@ -333,7 +363,7 @@ class textCNN:
             # initialize the embedding matrix variable
             w = tf.get_variable(
                 name='w',
-                shape=[V - 1, E],
+                shape=[V - 1, E, 1],
                 dtype=tf.float32,
                 initializer=tf.contrib.layers.xavier_initializer()
             )  # embedding matrix
@@ -354,10 +384,13 @@ class textCNN:
             # stack_list = [w[x[0, row], :] for row in rows]
             # embedding = tf.stack(stack_list, axis = 0)
             # embedding = tf.expand_dims(embedding, 0)
+            print("embedding size", x.get_shape().as_list())
             return x
 
     def _batch_gen(self, shuffle=True):
         X, y = self.X, self.y
+        print("in batch gen")
+        print("X, ", X.shape)
         B = self.params.get('batch_size', 128)
         epochs = self.params.get('epochs', 10)
         ids = [i for i in range(len(X))]

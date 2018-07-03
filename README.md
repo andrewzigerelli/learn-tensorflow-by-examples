@@ -1,7 +1,3 @@
-# learn-tensorflow-by-examples
-To train,
-make infer to infer 
-
 # Toxic_TextCNN
 
 This branch is to deploy the inference to movidius.

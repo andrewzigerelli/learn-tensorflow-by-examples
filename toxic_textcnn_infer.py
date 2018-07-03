@@ -397,9 +397,6 @@ class textCNN:
         w = self.em
         embedding = [np.take(w,Xb[i,:], axis=0) for i in range(Xb.shape[0])]
         embedding = np.array(embedding)
-
-        # expand dim to work with conv2d
-        embedding = np.expand_dims(embedding, axis=-1)
         return embedding
 
     def _batch_gen(self, shuffle=True):

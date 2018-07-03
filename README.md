@@ -21,8 +21,6 @@ packages listed in requirements.txt.
 
 ## Usage
 
-Explain how to run the automated tests for this system
-
 ### To train
 
 

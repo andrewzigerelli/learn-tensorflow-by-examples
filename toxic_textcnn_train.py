@@ -428,6 +428,7 @@ class textCNN:
         # clips input sequences to length S
         lengths = [len(i) for i in self.X]
         self.S = max(lengths)
+        save_obj(self.S, "S")
         print("m comment length", self.S)
 
 
